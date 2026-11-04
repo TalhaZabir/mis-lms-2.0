@@ -1,0 +1,69 @@
+# EXAMPLE ONLY — NOT ACTIVE.
+# This file is intentionally not named render.yaml, so Render will not apply it
+# automatically. It describes a separate 2.0 deployment only. Do not point it at
+# the original production database or the existing Render services.
+#
+# Before applying: create a separate PostgreSQL database, back it up, run the
+# reviewed schema migration manually, then rename/copy this file only if the owner
+# has explicitly approved a separate 2.0 deployment.
+services:
+  - type: web
+    name: mis-lms-2-api-example
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm ci && npm run db:schema:postgres && npx prisma generate --schema=prisma/schema.postgres.prisma
+    # No db:push or db:seed here. Apply migrations deliberately before starting.
+    startCommand: npm run start:api
+    healthCheckPath: /health
+    autoDeployTrigger: off
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES
+        value: 7d
+      - key: SESSION_TTL_HOURS
+        value: '168'
+      - key: TRUST_PROXY
+        value: '1'
+      - key: METRICS_TOKEN
+        generateValue: true
+      - key: ALLOW_PUBLIC_REGISTRATION
+        value: 'false'
+      - key: WORKERS_INLINE
+        value: 'true'
+      - key: EVENTS_INLINE
+        value: 'true'
+      - key: AI_ENABLED
+        value: 'false'
+      - key: RATE_MAX
+        value: '300'
+      - key: RATE_WINDOW_MS
+        value: '60000'
+      # Direct (non-pooled) PostgreSQL connection string for a SEPARATE 2.0
+      # database. Never reuse the production Neon URL.
+      - key: DATABASE_URL
+        sync: false
+      - key: CORS_ORIGINS
+        fromService:
+          name: mis-lms-2-web-example
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+
+  - type: web
+    name: mis-lms-2-web-example
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm ci && npm run build --workspace=apps/web
+    startCommand: npm run start --workspace=apps/web
+    healthCheckPath: /
+    autoDeployTrigger: off
+    envVars:
+      - key: NEXT_PUBLIC_API
+        fromService:
+          name: mis-lms-2-api-example
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL

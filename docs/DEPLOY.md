@@ -1,5 +1,9 @@
 # Deploy – MIS LMS (DU)
 
+> **Legacy 1.0 documentation.** Kept for historical context. For the 2.0 repository,
+> use [2.0/DEPLOYMENT.md](2.0/DEPLOYMENT.md). Do not modify the original production
+> services or database.
+
 ## 1) Dev (SQLite, 2 min)
 ```
 npm install

@@ -1,5 +1,11 @@
 # Deploy on Render
 
+> **Legacy 1.0 documentation.** This page describes the original production
+> deployment in the original repository. It is kept for historical accuracy and is
+> **not** the 2.0 deployment guide. Do not apply these steps to the 2.0 repository,
+> and do not modify the original Render services or Neon database. For 2.0, see
+> [2.0/DEPLOYMENT.md](2.0/DEPLOYMENT.md).
+
 This repo runs on Render as two free Node web services backed by a free Neon
 Postgres database.
 

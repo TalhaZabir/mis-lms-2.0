@@ -1,0 +1,58 @@
+name: CI
+
+# Continuous integration only. This workflow has read-only repository
+# permissions and deliberately contains no deploy, Render, SSH or registry
+# step. It must never be able to trigger a production deployment.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEXT_PUBLIC_API: http://localhost:4000
+
+jobs:
+  test-and-build:
+    name: Test and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate --schema=prisma/schema.prisma
+
+      - name: Run API tests
+        run: npm test
+        env:
+          NODE_ENV: test
+          AI_ENABLED: 'false'
+          ALLOW_PUBLIC_REGISTRATION: 'false'
+          WORKERS_INLINE: 'false'
+          EVENTS_INLINE: 'false'
+
+      - name: Run AI evaluation
+        run: npm run ai:eval
+        env:
+          AI_EVAL_SKIP_SETUP: '0'
+
+      - name: Build web app
+        run: npm run build --workspace=apps/web

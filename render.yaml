@@ -1,16 +1,23 @@
-# Render Blueprint – MIS LMS (web + API)
-# Database: free Neon Postgres (set DATABASE_URL when applying this Blueprint).
-# Free web services sleep after 15 min idle.
+# Render blueprint for a SEPARATE MIS LMS 2.0 deployment.
+#
+# Safety notes:
+# - This file is not connected to the original production services. Do not apply
+#   it while those services exist unless the owner explicitly approves a separate
+#   2.0 deployment.
+# - Automatic deployments are disabled (`autoDeployTrigger: off`).
+# - Startup never pushes the schema or seeds the database. Apply migrations
+#   deliberately after a backup.
+# - Keep AI_ENABLED=false until a provider and data-protection review are complete.
 services:
   - type: web
-    name: mis-lms-api
+    name: mis-lms-2-api
     runtime: node
     plan: free
     region: oregon
     buildCommand: npm ci && npm run db:schema:postgres && npx prisma generate --schema=prisma/schema.postgres.prisma
-    startCommand: npm run render:start
+    startCommand: npm run start:api
     healthCheckPath: /health
-    autoDeployTrigger: commit
+    autoDeployTrigger: off
     envVars:
       - key: NODE_ENV
         value: production
@@ -18,32 +25,46 @@ services:
         generateValue: true
       - key: JWT_EXPIRES
         value: 7d
+      - key: SESSION_TTL_HOURS
+        value: '168'
+      - key: TRUST_PROXY
+        value: '1'
+      - key: METRICS_TOKEN
+        generateValue: true
+      - key: ALLOW_PUBLIC_REGISTRATION
+        value: 'false'
+      - key: WORKERS_INLINE
+        value: 'true'
+      - key: EVENTS_INLINE
+        value: 'true'
+      - key: AI_ENABLED
+        value: 'false'
       - key: RATE_MAX
-        value: "300"
+        value: '300'
       - key: RATE_WINDOW_MS
-        value: "60000"
-      # Direct (non-pooled) Neon connection string, e.g.
-      # postgresql://user:pass@ep-xxx.us-east-2.aws.neon.tech/mislms?sslmode=require
+        value: '60000'
+      # Direct (non-pooled) PostgreSQL connection string for a SEPARATE 2.0
+      # database. Never reuse the original production Neon URL.
       - key: DATABASE_URL
         sync: false
       - key: CORS_ORIGINS
         fromService:
-          name: mis-lms-web
+          name: mis-lms-2-web
           type: web
           envVarKey: RENDER_EXTERNAL_URL
 
   - type: web
-    name: mis-lms-web
+    name: mis-lms-2-web
     runtime: node
     plan: free
     region: oregon
     buildCommand: npm ci && npm run build --workspace=apps/web
     startCommand: npm run start --workspace=apps/web
     healthCheckPath: /
-    autoDeployTrigger: commit
+    autoDeployTrigger: off
     envVars:
       - key: NEXT_PUBLIC_API
         fromService:
-          name: mis-lms-api
+          name: mis-lms-2-api
           type: web
           envVarKey: RENDER_EXTERNAL_URL

@@ -25,6 +25,6 @@
     "prisma": "^5.14.0"
   },
   "devDependencies": {
-    "concurrently": "^8.2.2"
+    "concurrently": "^10.0.6"
   }
 }

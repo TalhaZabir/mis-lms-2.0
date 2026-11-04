@@ -1,94 +1,253 @@
+const crypto = require('crypto');
+const http = require('http');
 const express = require('express');
 const cors = require('cors');
-const http = require('http');
-const { Server } = require('socket.io');
+const helmet = require('helmet');
+
+const config = require('./config');
 const prisma = require('./db');
+const { logger, requestContext } = require('./core/logger');
+const { errors, notFoundHandler, errorHandler } = require('./core/errors');
+const { RateLimiter } = require('./core/rate-limit');
+const { metricsMiddleware, metricsHandler } = require('./core/metrics');
+const { attachRealtime, closeRealtime } = require('./core/realtime');
+const { registerHandlers, enqueueMaintenanceJobs } = require('./core/handlers');
+const { startJobLoop, stopJobLoop } = require('./core/jobs');
+const { startEventLoop, stopEventLoop } = require('./core/events');
+const { buildOpenApi } = require('./openapi');
 
-const authRoutes = require('./routes/auth');
-const academicRoutes = require('./routes/academic');
-const facultyRoutes = require('./routes/faculty');
-const studentRoutes = require('./routes/student');
-const socialRoutes = require('./routes/social');
-const resourceRoutes = require('./routes/resources');
+const identityRoutes = require('./modules/identity/routes');
+const academicRoutes = require('./modules/academic/routes');
+const learningRoutes = require('./modules/learning/routes');
+const communityRoutes = require('./modules/community/routes');
+const resourceRoutes = require('./modules/resources/routes');
+const searchRoutes = require('./modules/search/routes');
+const analyticsRoutes = require('./modules/analytics/routes');
+const aiRoutes = require('./modules/ai/routes');
 
-const app = express();
-app.disable('x-powered-by');
-
-// CORS allowlist for deploy (comma-separated) — defaults to open for DU LAN/dev
-const ORIGINS = (process.env.CORS_ORIGINS || '*').split(',').map(s => s.trim()).filter(Boolean);
-app.use(cors({ origin: ORIGINS.includes('*') ? true : ORIGINS, credentials: true }));
-app.use(express.json({ limit: '5mb' }));
-
-// Minimal security headers (no extra deps for deploy)
-app.use((req, res, next) => {
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Referrer-Policy', 'no-referrer');
-  res.setHeader('X-XSS-Protection', '0');
-  next();
+const globalLimiter = new RateLimiter({
+  windowMs: config.rateLimit.windowMs,
+  max: config.rateLimit.max,
+  name: 'global',
+  keyGenerator: (req) => req.ip || 'unknown',
+  message: 'Too many requests — please slow down.',
 });
 
-// Tiny in-memory rate limiter (deploy-safe, no Redis needed for MVP)
-const buckets = new Map();
-const WINDOW_MS = parseInt(process.env.RATE_WINDOW_MS || '60000', 10);
-const MAX_REQ = parseInt(process.env.RATE_MAX || '300', 10);
-app.use((req, res, next) => {
-  if (req.path === '/health' || req.path === '/ready') return next();
-  const key = req.ip || req.headers['x-forwarded-for'] || 'local';
-  const now = Date.now();
-  const b = buckets.get(key) || { count: 0, reset: now + WINDOW_MS };
-  if (now > b.reset) { b.count = 0; b.reset = now + WINDOW_MS; }
-  b.count++; buckets.set(key, b);
-  if (b.count > MAX_REQ) return res.status(429).json({ error: 'Too many requests — slow down' });
-  next();
-});
+const PUBLIC_PATHS = new Set(['/health', '/ready', '/metrics', '/openapi.json']);
 
-// Request log (single line, prod-friendly)
-app.use((req, res, next) => {
-  const t = Date.now();
-  res.on('finish', () => console.log(`${req.method} ${req.path} ${res.statusCode} ${Date.now() - t}ms`));
-  next();
-});
+function corsOptions() {
+  return {
+    origin(origin, callback) {
+      if (!origin) return callback(null, true);
+      if (config.corsOrigins.includes('*')) return callback(null, true);
+      if (config.corsOrigins.includes(origin)) return callback(null, true);
+      return callback(errors.forbidden('Origin is not allowed by CORS'));
+    },
+    credentials: true,
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key', 'X-Request-Id', 'X-Metrics-Token'],
+    exposedHeaders: ['X-Request-Id', 'RateLimit-Limit', 'RateLimit-Remaining', 'RateLimit-Reset', 'Idempotent-Replayed'],
+    maxAge: 600,
+  };
+}
 
-app.get('/health', (req, res) => res.json({ ok: true, service: 'mis-lms-api', parts: '5/5 done', time: new Date().toISOString() }));
-app.get('/ready', async (req, res) => {
-  try { await prisma.$queryRaw`SELECT 1`; res.json({ ready: true }); }
-  catch (e) { res.status(503).json({ ready: false, error: e.message }); }
-});
-app.use('/auth', authRoutes);
-app.use('/', academicRoutes);
-app.use('/', facultyRoutes);
-app.use('/', studentRoutes);
-app.use('/', socialRoutes);
-app.use('/', resourceRoutes);
+function metricsAuthorized(req) {
+  const token = process.env.METRICS_TOKEN;
+  if (!token) return !config.isProduction;
+  const provided = req.get('x-metrics-token') || (req.get('authorization') || '').replace(/^Bearer\s+/i, '');
+  const left = Buffer.from(String(provided));
+  const right = Buffer.from(String(token));
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
 
-// 404 + error handler (deploy-grade JSON errors)
-app.use((req, res) => res.status(404).json({ error: `Not found: ${req.method} ${req.path}` }));
-// eslint-disable-next-line no-unused-vars
-app.use((err, req, res, next) => {
-  console.error(err);
-  res.status(500).json({ error: process.env.NODE_ENV === 'production' ? 'Internal error' : err.message });
-});
+function healthPayload() {
+  return {
+    ok: true,
+    service: 'mis-lms-api',
+    version: config.version,
+    env: config.env,
+    uptimeSeconds: Math.round(process.uptime()),
+    time: new Date().toISOString(),
+  };
+}
 
-// Socket (persist + broadcast) with auth-light check (senderId must exist)
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: ORIGINS.includes('*') ? true : ORIGINS } });
-global.__mis_io = io;
-io.on('connection', (socket) => {
-  socket.on('join', (room) => { if (typeof room === 'string' && room.length < 100) socket.join(room); });
-  socket.on('message', async (msg) => {
+async function readyPayload() {
+  await prisma.$queryRaw`SELECT 1`;
+  return { ready: true, database: 'ok', version: config.version };
+}
+
+function apiRouter() {
+  const router = express.Router();
+  router.get('/health', (req, res) => res.json(healthPayload()));
+  router.get('/ready', async (req, res) => {
     try {
-      if (msg && msg.conversationId && msg.senderId && typeof msg.body === 'string' && msg.body.length < 5000) {
-        const mem = await prisma.conversationMember.findUnique({ where: { conversationId_userId: { conversationId: msg.conversationId, userId: msg.senderId } } }).catch(() => null);
-        if (!mem) { socket.emit('error', { error: 'Not a member' }); return; }
-        const saved = await prisma.message.create({ data: { conversationId: msg.conversationId, senderId: msg.senderId, body: msg.body } });
-        io.to(msg.conversationId).emit('message', saved);
-        return;
-      }
-    } catch {}
-    io.to((msg && msg.conversationId) || 'global').emit('message', { ...(msg || {}), at: new Date().toISOString() });
+      res.json(await readyPayload());
+    } catch (error) {
+      logger.error('readiness_failed', { error: logger.serializeError(error) });
+      res.status(503).json({ ready: false, database: 'unavailable', version: config.version });
+    }
   });
-});
+  router.use(identityRoutes);
+  router.use(academicRoutes);
+  router.use(learningRoutes);
+  router.use(communityRoutes);
+  router.use(resourceRoutes);
+  router.use(searchRoutes);
+  router.use(analyticsRoutes);
+  router.use(aiRoutes);
+  return router;
+}
 
-const PORT = process.env.PORT || 4000;
-server.listen(PORT, () => console.log(`MIS LMS API on :${PORT} (env=${process.env.NODE_ENV || 'dev'})`));
+function createApp() {
+  registerHandlers();
+  const app = express();
+  app.disable('x-powered-by');
+  app.disable('etag');
+  if (config.trustProxy !== false) app.set('trust proxy', config.trustProxy);
+
+  app.use(helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: 'same-site' },
+  }));
+  app.use(cors(corsOptions()));
+  app.use(requestContext());
+  app.use(express.json({ limit: config.jsonLimit, strict: true }));
+  app.use(express.urlencoded({ extended: false, limit: config.jsonLimit }));
+  app.use(metricsMiddleware);
+
+  app.use((req, res, next) => {
+    if (PUBLIC_PATHS.has(req.path)) return next();
+    return globalLimiter.middleware()(req, res, next);
+  });
+
+  app.get('/health', (req, res) => {
+    res.json(healthPayload());
+  });
+
+  app.get('/ready', async (req, res) => {
+    try {
+      res.json(await readyPayload());
+    } catch (error) {
+      logger.error('readiness_failed', { error: logger.serializeError(error) });
+      res.status(503).json({ ready: false, database: 'unavailable', version: config.version });
+    }
+  });
+
+  app.get('/metrics', (req, res, next) => {
+    if (!metricsAuthorized(req)) return next(errors.notFound('Not found'));
+    return metricsHandler(req, res);
+  });
+
+  app.get('/openapi.json', (req, res) => {
+    res.json(buildOpenApi());
+  });
+
+  const router = apiRouter();
+  app.use('/v1', router);
+  // MIGRATION SHIM: existing single-page client calls unversioned paths.
+  app.use('/', router);
+
+  app.use(notFoundHandler);
+  app.use(errorHandler);
+  return app;
+}
+
+let maintenanceTimer = null;
+
+function startBackgroundWork({ enqueueMaintenance = true } = {}) {
+  registerHandlers();
+  if (config.features.events) startEventLoop();
+  if (config.features.workers) startJobLoop();
+  if (enqueueMaintenance) {
+    enqueueMaintenanceJobs().catch((error) => {
+      logger.warn('maintenance_enqueue_failed', { error: logger.serializeError(error) });
+    });
+    if (!maintenanceTimer) {
+      maintenanceTimer = setInterval(() => {
+        enqueueMaintenanceJobs().catch((error) => {
+          logger.warn('maintenance_enqueue_failed', { error: logger.serializeError(error) });
+        });
+      }, 24 * 60 * 60 * 1000);
+      if (maintenanceTimer.unref) maintenanceTimer.unref();
+    }
+  }
+}
+
+function stopBackgroundWork() {
+  stopJobLoop();
+  stopEventLoop();
+  if (maintenanceTimer) clearInterval(maintenanceTimer);
+  maintenanceTimer = null;
+  globalLimiter.destroy();
+}
+
+async function startServer({ port = config.port } = {}) {
+  registerHandlers();
+  const app = createApp();
+  const server = http.createServer(app);
+
+  if (config.features.realtime) attachRealtime(server);
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+
+  startBackgroundWork();
+  logger.info('api_started', {
+    port,
+    env: config.env,
+    version: config.version,
+    realtime: config.features.realtime,
+    workers: config.features.workers,
+    events: config.features.events,
+    ai: config.ai.enabled,
+  });
+
+  let shuttingDown = false;
+  const shutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info('api_shutdown', { signal });
+    stopBackgroundWork();
+    const force = setTimeout(() => {
+      logger.error('api_shutdown_forced', { signal });
+      process.exit(1);
+    }, 10_000);
+    if (force.unref) force.unref();
+    try {
+      await closeRealtime();
+      await new Promise((resolve) => server.close(() => resolve()));
+      await prisma.$disconnect();
+    } catch (error) {
+      logger.error('api_shutdown_failed', { error: logger.serializeError(error) });
+    } finally {
+      clearTimeout(force);
+    }
+    process.exit(0);
+  };
+
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  process.once('SIGINT', () => shutdown('SIGINT'));
+
+  return server;
+}
+
+if (require.main === module) {
+  startServer().catch((error) => {
+    logger.error('api_start_failed', { error: logger.serializeError(error) });
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  createApp,
+  startServer,
+  startBackgroundWork,
+  stopBackgroundWork,
+  apiRouter,
+};

@@ -8,18 +8,23 @@ function logoutAndRedirect() {
   if (!window.location.pathname.startsWith('/login')) window.location.href = `/login?next=${next}`;
 }
 
-export async function api(path, opts = {}) {
+export async function apiRaw(path, opts = {}) {
   const token = typeof window !== 'undefined' ? localStorage.getItem('mis_token') : null;
   const res = await fetch(`${API}${path}`, {
     ...opts,
     headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(opts.headers || {}) },
   });
   if (res.status === 401) {
-    const body = await res.json().catch(() => ({}));
-    // Only auto-logout on explicit auth failures, not on every 401 from a poll
-    if (body.error === 'Invalid token' || body.error === 'No token') logoutAndRedirect();
+    // Any authenticated 401 means the server-side session was revoked or expired.
+    const body = await res.clone().json().catch(() => ({}));
+    logoutAndRedirect();
     throw new Error(body.error || 'Session expired — please login again');
   }
+  return res;
+}
+
+export async function api(path, opts = {}) {
+  const res = await apiRaw(path, opts);
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Request failed (${res.status})`);
   return res.json();
 }

@@ -1,12 +1,15 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { api, fmtDate } from '../../lib/api';
+import { api, apiRaw, fmtDate } from '../../lib/api';
 import { Guard } from '../../components/Guard';
+import { useAuth } from '../../components/AuthProvider';
 import { LEARN_ROLES } from '../../lib/roles';
 
 const TABS = ['courses', 'learn', 'assignments', 'quizzes', 'attendance', 'routine', 'results'];
 
 export default function Learn() {
+  const { user } = useAuth();
+  const tabs = user?.role === 'STUDENT' ? [...TABS, 'progress'] : TABS;
   const [courses, setCourses] = useState([]);
   const [oid, setOid] = useState('');
   const [tab, setTab] = useState('courses');
@@ -15,6 +18,7 @@ export default function Learn() {
   const [att, setAtt] = useState(null);
   const [routine, setRoutine] = useState(null);
   const [results, setResults] = useState([]);
+  const [progress, setProgress] = useState(null);
   const [msg, setMsg] = useState('');
   const [ok, setOk] = useState('');
   const [sub, setSub] = useState({ assignmentId: '', body: '' });
@@ -34,10 +38,29 @@ export default function Learn() {
       if (tab === 'attendance' && oid) setAtt(await api(`/offerings/${oid}/attendance/me`));
       if (tab === 'routine') setRoutine(await api('/me/routine'));
       if (tab === 'results') setResults(await api('/me/results'));
+      if (tab === 'progress') setProgress(await api('/me/progress'));
     } catch (e) { setMsg(e.message); }
   }
   useEffect(() => { init(); }, []);
   useEffect(() => { load(); }, [oid, tab]);
+
+  async function downloadCalendar() {
+    try {
+      setMsg(''); setOk('');
+      const response = await apiRaw('/me/calendar.ics');
+      if (!response.ok) throw new Error('Could not download the calendar');
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'mis-lms-calendar.ics';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setOk('Calendar downloaded — import the .ics file into your calendar app.');
+    } catch (e) { setMsg(e.message); }
+  }
 
   const off = courses.find(c => c.offeringId === oid);
 
@@ -52,7 +75,7 @@ export default function Learn() {
           {courses.map(c => <option key={c.offeringId} value={c.offeringId}>{c.offering?.course?.code} Sec-{c.offering?.section}</option>)}
         </select>
       </div>
-      <div className="tabs">{TABS.map(t => <button key={t} className={tab === t ? 'on' : ''} onClick={() => setTab(t)}>{t}</button>)}<button onClick={() => { init(); load(); }}>↻</button></div>
+      <div className="tabs">{tabs.map(t => <button key={t} className={tab === t ? 'on' : ''} onClick={() => setTab(t)}>{t}</button>)}<button onClick={() => { init(); load(); }}>↻</button></div>
       {msg && <div className="alert-err">{msg}</div>}
       {ok && <div className="alert-ok">{ok}</div>}
 
@@ -131,11 +154,59 @@ export default function Learn() {
 
       {tab === 'routine' && routine && (
         <div className="two">
-          <div className="card"><h3>🗓 Weekly routine</h3>{routine.offerings.map(o => <p key={o.id} style={{ fontSize: 14 }}><b>{o.course?.code}</b> Sec-{o.section} · {o.room} · {o.routineSlot}</p>)}</div>
+          <div className="card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <h3 style={{ margin: 0 }}>🗓 Weekly routine</h3>
+              <button className="btn btn-sm" onClick={downloadCalendar}>Download .ics</button>
+            </div>
+            {routine.offerings.map(o => <p key={o.id} style={{ fontSize: 14 }}><b>{o.course?.code}</b> Sec-{o.section} · {o.room} · {o.routineSlot}</p>)}
+          </div>
           <div>
             <div className="card"><h3>🔴 Upcoming live</h3>{(routine.live || []).map(l => <p key={l.id} style={{ fontSize: 14 }}><b>{l.title}</b> · {fmtDate(l.startsAt)} · <a href={l.joinUrl} target="_blank">Join</a></p>)}{!routine.live?.length && <p>No upcoming live.</p>}</div>
             <div className="card" style={{ marginTop: 10 }}><h3>⏰ Due soon</h3>{(routine.assignments || []).map(a => <p key={a.id} style={{ fontSize: 14 }}><b>{a.title}</b> · {fmtDate(a.dueAt)}</p>)}</div>
           </div>
+        </div>
+      )}
+
+      {tab === 'progress' && progress && (
+        <div>
+          <div className="card">
+            <h3>Degree progress</h3>
+            <div className="progress"><div style={{ width: `${Math.min(100, progress.completionPct)}%` }} /></div>
+            <p style={{ fontSize: 14 }}>
+              <b>{progress.earnedCredits}</b> earned · <b>{progress.inProgressCredits}</b> in progress · <b>{progress.requiredCredits}</b> required · <b>{progress.remainingCredits}</b> remaining
+            </p>
+            <div className="grid" style={{ marginTop: 10 }}>
+              <div className="card"><b style={{ fontSize: 22 }}>{progress.gpa ?? '—'}</b><p>GPA from locked offerings</p></div>
+              <div className="card"><b style={{ fontSize: 22 }}>{progress.completionPct}%</b><p>Completion</p></div>
+              <div className="card"><b style={{ fontSize: 22 }}>{progress.gradedCredits}</b><p>Graded credits</p></div>
+            </div>
+            <p style={{ fontSize: 12 }}>{progress.note}</p>
+          </div>
+          <div className="card" style={{ marginTop: 12, padding: 0, overflow: 'auto' }}>
+            <table className="tbl">
+              <thead><tr><th>Course</th><th>Term</th><th>Credits</th><th>Score</th><th>Grade</th></tr></thead>
+              <tbody>
+                {progress.courses.map((course) => (
+                  <tr key={course.offeringId}>
+                    <td><b>{course.courseCode}</b> — {course.title}</td>
+                    <td>{course.term || '—'}</td>
+                    <td>{course.credits}</td>
+                    <td>{course.pct}%</td>
+                    <td><span className={`badge ${course.letter === 'F' ? 'red' : course.isLocked ? 'green' : ''}`}>{course.letter}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {progress.missingPrerequisites?.length > 0 && (
+            <div className="card" style={{ marginTop: 12 }}>
+              <h3>Prerequisite attention</h3>
+              {progress.missingPrerequisites.map((row) => (
+                <p key={row.courseCode} style={{ fontSize: 14 }}><b>{row.courseCode}</b> — {row.title}: missing {row.missing.join(', ')}</p>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

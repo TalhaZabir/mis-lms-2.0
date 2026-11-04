@@ -1,0 +1,10 @@
+node_modules/
+.next/
+dist/
+*.db
+*.db-journal
+.env
+.env.local
+uploads/
+# Generated from prisma/schema.prisma by scripts/make-postgres-schema.js
+prisma/schema.postgres.prisma

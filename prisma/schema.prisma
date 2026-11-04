@@ -1,0 +1,442 @@
+// MIS LMS – Full schema (Parts 1-5). Dev: sqlite. Prod: switch provider to postgresql.
+// datasource db { provider = "postgresql" url = env("DATABASE_URL") }
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ---------- Part 1: Foundation ----------
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         String   @default("STUDENT") // SUPER_ADMIN, ADMIN_STAFF, FACULTY, TA, STUDENT, ALUMNI, MODERATOR
+  phone        String?
+  avatarUrl    String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  // relations
+  enrollments  Enrollment[]
+  taughtLinks  OfferingFaculty[]
+  posts        SocialPost[]
+  comments     PostComment[]
+  messages     Message[]
+  convMembers  ConversationMember[]
+  alumniProfile AlumniProfile?
+  resourcesAdded Resource[] @relation("AddedBy")
+  notifications Notification[]
+  auditLogs    AuditLog[]
+  modActions   ModerationAction[] @relation("ModBy")
+  mentorRequestsSent MentorshipRequest[] @relation("Mentee")
+  mentorRequestsReceived MentorshipRequest[] @relation("Mentor")
+}
+
+model Program {
+  id          String   @id @default(cuid())
+  code        String   @unique // BBA-MIS, MBA-MIS, EMBA, DIPLOMA
+  name        String
+  description String?
+  batches     Batch[]
+  courses     Course[]
+}
+
+model Batch {
+  id        String   @id @default(cuid())
+  programId String
+  program   Program  @relation(fields: [programId], references: [id], onDelete: Cascade)
+  name      String   // e.g. BBA 29th, MBA 12th
+  session   String   // e.g. 2023-24
+  enrollments Enrollment[]
+}
+
+model Term {
+  id        String   @id @default(cuid())
+  name      String   // e.g. BBA Sem-3 Fall 2026
+  code      String   @unique
+  startsAt  DateTime
+  endsAt    DateTime
+  status    String   @default("DRAFT") // DRAFT, ACTIVE, CLOSED
+  offerings Offering[]
+}
+
+model Course {
+  id          String   @id @default(cuid())
+  code        String   @unique // MIS-101, MIS-352
+  title       String
+  credits     Float    @default(3)
+  programId   String
+  program     Program  @relation(fields: [programId], references: [id])
+  description String?
+  offerings   Offering[]
+  resources   Resource[]
+}
+
+model Offering {
+  id        String   @id @default(cuid())
+  courseId  String
+  course    Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  termId    String
+  term      Term     @relation(fields: [termId], references: [id], onDelete: Cascade)
+  section   String   @default("A")
+  room      String?
+  routineSlot String? // e.g. Sun 10:00-11:30
+  isLocked  Boolean  @default(false) // locks grades
+  faculty   OfferingFaculty[]
+  enrollments Enrollment[]
+  modules   Module[]
+  assignments Assignment[]
+  quizzes   Quiz[]
+  attendanceSessions AttendanceSession[]
+  liveClasses LiveClass[]
+  gradeItems GradeItem[]
+  conversations Conversation[]
+  @@unique([courseId, termId, section])
+}
+
+model OfferingFaculty {
+  offeringId String
+  offering   Offering @relation(fields: [offeringId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  isLead     Boolean  @default(true)
+  @@id([offeringId, userId])
+}
+
+model Enrollment {
+  id         String   @id @default(cuid())
+  offeringId String
+  offering   Offering @relation(fields: [offeringId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  batchId    String?
+  batch      Batch?   @relation(fields: [batchId], references: [id])
+  status     String   @default("ENROLLED")
+  createdAt  DateTime @default(now())
+  @@unique([offeringId, userId])
+}
+
+// ---------- Part 2: Faculty tools ----------
+model Module {
+  id         String @id @default(cuid())
+  offeringId String
+  offering   Offering @relation(fields: [offeringId], references: [id], onDelete: Cascade)
+  title      String
+  order      Int    @default(0)
+  lessons    Lesson[]
+}
+
+model Lesson {
+  id       String @id @default(cuid())
+  moduleId String
+  module   Module @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  title    String
+  kind     String @default("VIDEO") // VIDEO, PDF, SLIDE, LINK, SCORM
+  url      String?
+  body     String?
+  order    Int    @default(0)
+}
+
+model Assignment {
+  id         String   @id @default(cuid())
+  offeringId String
+  offering   Offering @relation(fields: [offeringId], references: [id], onDelete: Cascade)
+  title      String
+  brief      String?
+  dueAt      DateTime
+  maxMarks   Float    @default(10)
+  lateRule   String   @default("NO_LATE")
+  submissions Submission[]
+}
+
+model Submission {
+  id           String   @id @default(cuid())
+  assignmentId String
+  assignment   Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  userId       String
+  fileUrl      String?
+  body         String?
+  marks        Float?
+  feedback     String?
+  createdAt    DateTime @default(now())
+  @@unique([assignmentId, userId])
+}
+
+model QuestionBank {
+  id    String @id @default(cuid())
+  title String
+  courseCode String?
+  questions Question[]
+}
+
+model Question {
+  id      String @id @default(cuid())
+  bankId  String
+  bank    QuestionBank @relation(fields: [bankId], references: [id], onDelete: Cascade)
+  kind    String @default("MCQ") // MCQ, TRUE_FALSE, SHORT, DESCRIPTIVE
+  stem    String
+  options String? // JSON string
+  answer  String?
+  marks   Float  @default(1)
+}
+
+model Quiz {
+  id         String   @id @default(cuid())
+  offeringId String
+  offering   Offering @relation(fields: [offeringId], references: [id], onDelete: Cascade)
+  title      String
+  durationMin Int     @default(20)
+  negativeMark Float   @default(0)
+  startsAt   DateTime?
+  endsAt     DateTime?
+  attempts   QuizAttempt[]
+}
+
+model QuizAttempt {
+  id        String   @id @default(cuid())
+  quizId    String
+  quiz      Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  userId    String
+  answers   String? // JSON
+  score     Float?
+  createdAt DateTime @default(now())
+}
+
+model AttendanceSession {
+  id         String   @id @default(cuid())
+  offeringId String
+  offering   Offering @relation(fields: [offeringId], references: [id], onDelete: Cascade)
+  date       DateTime @default(now())
+  qrToken    String?
+  records    AttendanceRecord[]
+}
+
+model AttendanceRecord {
+  id        String @id @default(cuid())
+  sessionId String
+  session   AttendanceSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  userId    String
+  status    String @default("PRESENT") // PRESENT, ABSENT, LATE
+  @@unique([sessionId, userId])
+}
+
+model LiveClass {
+  id         String   @id @default(cuid())
+  offeringId String
+  offering   Offering @relation(fields: [offeringId], references: [id], onDelete: Cascade)
+  title      String
+  joinUrl    String
+  startsAt   DateTime
+  recordingUrl String?
+}
+
+model Announcement {
+  id        String   @id @default(cuid())
+  title     String
+  body      String
+  audience  String   @default("ALL") // ALL, PROGRAM, BATCH, OFFERING
+  refId     String?
+  createdAt DateTime @default(now())
+}
+
+model GradeItem {
+  id         String @id @default(cuid())
+  offeringId String
+  offering   Offering @relation(fields: [offeringId], references: [id], onDelete: Cascade)
+  name       String // CT, Mid, Final, Assignment
+  weight     Float
+  grades     Grade[]
+}
+
+model Grade {
+  id       String @id @default(cuid())
+  itemId   String
+  item     GradeItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  userId   String
+  marks    Float
+  @@unique([itemId, userId])
+}
+
+// ---------- Part 4: Social + Alumni + Chat ----------
+model AlumniProfile {
+  userId          String  @id
+  user            User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gradBatch       String
+  program         String
+  org             String?
+  designation     String?
+  linkedin        String?
+  mentorshipOptIn Boolean @default(false)
+  isVerified      Boolean @default(false)
+  verifiedBy      String?
+}
+
+model MentorshipRequest {
+  id        String @id @default(cuid())
+  menteeId  String
+  mentee    User   @relation("Mentee", fields: [menteeId], references: [id], onDelete: Cascade)
+  mentorId  String
+  mentor    User   @relation("Mentor", fields: [mentorId], references: [id], onDelete: Cascade)
+  message   String?
+  status    String @default("PENDING")
+  createdAt DateTime @default(now())
+}
+
+model Conversation {
+  id               String @id @default(cuid())
+  type             String @default("DM") // DM, GROUP, MENTORSHIP, PLACEMENT
+  title            String?
+  offeringId       String?
+  offering         Offering? @relation(fields: [offeringId], references: [id])
+  batchName        String?
+  createdBy        String?
+  createdAt        DateTime @default(now())
+  members          ConversationMember[]
+  messages         Message[]
+}
+
+model ConversationMember {
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role           String @default("MEMBER") // ADMIN, MEMBER
+  @@id([conversationId, userId])
+}
+
+model Message {
+  id             String @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId       String
+  sender         User @relation(fields: [senderId], references: [id])
+  body           String
+  attachments    String?
+  replyToId      String?
+  isDeleted      Boolean @default(false)
+  createdAt      DateTime @default(now())
+}
+
+model SocialPost {
+  id         String @id @default(cuid())
+  authorId   String
+  author     User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  body       String
+  type       String @default("TEXT") // TEXT, IMAGE, FILE, POLL, JOB, EVENT, HELP
+  courseTag  String?
+  imageUrls  String?
+  pollData   String?
+  jobMeta    String?
+  visibility String @default("BATCH") // BATCH, PROGRAM, ALUMNI_CIRCLE, MIS_PUBLIC
+  isPinned   Boolean @default(false)
+  isHidden   Boolean @default(false)
+  createdAt  DateTime @default(now())
+  likes      PostLike[]
+  comments   PostComment[]
+  saves      PostSave[]
+  reports    PostReport[]
+}
+
+model PostLike {
+  postId String
+  post   SocialPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  userId String
+  @@id([postId, userId])
+}
+
+model PostComment {
+  id       String @id @default(cuid())
+  postId   String
+  post     SocialPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  authorId String
+  author   User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  body     String
+  parentId String?
+  createdAt DateTime @default(now())
+}
+
+model PostSave {
+  postId String
+  post   SocialPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  userId String
+  @@id([postId, userId])
+}
+
+model PostReport {
+  id         String @id @default(cuid())
+  postId     String
+  post       SocialPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  reporterId String
+  reason     String
+  status     String @default("OPEN") // OPEN, ACTIONED, DISMISSED
+  createdAt  DateTime @default(now())
+}
+
+model ModerationAction {
+  id        String @id @default(cuid())
+  postId    String?
+  targetUserId String?
+  modById   String
+  modBy     User @relation("ModBy", fields: [modById], references: [id])
+  action    String // HIDE, WARN, MUTE, BAN, DISMISS
+  note      String?
+  createdAt DateTime @default(now())
+}
+
+// ---------- Part 5: Resources + Notifications ----------
+model Resource {
+  id          String @id @default(cuid())
+  title       String
+  url         String
+  category    String // COURSE_MAT, TOOLS, RESEARCH, CAREER, SCHOLARSHIP, EXAM
+  description String?
+  tags        String?
+  forProgram  String?
+  courseId    String?
+  course      Course? @relation(fields: [courseId], references: [id])
+  addedById   String
+  addedBy     User @relation("AddedBy", fields: [addedById], references: [id])
+  isVerified  Boolean @default(false)
+  brokenFlag  Boolean @default(false)
+  createdAt   DateTime @default(now())
+  votes       ResourceVote[]
+  bookmarks   ResourceBookmark[]
+}
+
+model ResourceVote {
+  resourceId String
+  resource   Resource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  userId     String
+  @@id([resourceId, userId])
+}
+
+model ResourceBookmark {
+  resourceId String
+  resource   Resource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  userId     String
+  @@id([resourceId, userId])
+}
+
+model Notification {
+  id        String @id @default(cuid())
+  userId    String
+  user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  body      String?
+  link      String?
+  isRead    Boolean @default(false)
+  createdAt DateTime @default(now())
+}
+
+model AuditLog {
+  id        String @id @default(cuid())
+  userId    String?
+  user      User? @relation(fields: [userId], references: [id])
+  action    String
+  meta      String?
+  createdAt DateTime @default(now())
+}

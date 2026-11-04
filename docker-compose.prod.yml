@@ -1,0 +1,48 @@
+# Production stack: api + web + postgres + redis (DU server / VPS)
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: mislms
+      POSTGRES_USER: mis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mis"]
+      interval: 10s
+      retries: 5
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+  api:
+    build: ./apps/api
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://lms-mis.du.ac.bd}
+      RATE_MAX: ${RATE_MAX:-300}
+      DATABASE_URL: postgresql://mis:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/mislms
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "4000:4000"
+  web:
+    build:
+      context: ./apps/web
+      args:
+        NEXT_PUBLIC_API: ${NEXT_PUBLIC_API:-http://api:4000}
+    environment:
+      NEXT_PUBLIC_API: ${NEXT_PUBLIC_API:-http://api:4000}
+      PORT: 3000
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+volumes:
+  pgdata:
+  redisdata:

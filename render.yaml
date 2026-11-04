@@ -1,0 +1,56 @@
+# Render Blueprint – MIS LMS (web + API + Postgres)
+# Free plan: web services sleep after 15 min idle; free Postgres expires 30 days after creation.
+services:
+  - type: web
+    name: mis-lms-api
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci && npm run db:schema:postgres && npx prisma generate --schema=prisma/schema.postgres.prisma
+    startCommand: npm run render:start
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES
+        value: 7d
+      - key: RATE_MAX
+        value: "300"
+      - key: RATE_WINDOW_MS
+        value: "60000"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: mis-lms-db
+          property: connectionString
+      - key: CORS_ORIGINS
+        fromService:
+          name: mis-lms-web
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+
+  - type: web
+    name: mis-lms-web
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci && npm run build --workspace=apps/web
+    startCommand: npm run start --workspace=apps/web
+    healthCheckPath: /
+    autoDeployTrigger: commit
+    envVars:
+      - key: NEXT_PUBLIC_API
+        fromService:
+          name: mis-lms-api
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+
+databases:
+  - name: mis-lms-db
+    plan: free
+    region: singapore
+    postgresMajorVersion: "16"
+    databaseName: mislms
+    user: mis

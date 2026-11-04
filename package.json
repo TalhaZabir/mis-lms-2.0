@@ -1,0 +1,27 @@
+{
+  "name": "mis-lms-du",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["apps/web", "apps/api"],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace=apps/api\" \"npm run dev --workspace=apps/web\"",
+    "build": "npm run build --workspace=apps/web",
+    "db:push": "npx prisma db push --schema=prisma/schema.prisma",
+    "db:schema:postgres": "node scripts/make-postgres-schema.js",
+    "db:push:prod": "prisma db push --schema=prisma/schema.postgres.prisma",
+    "db:seed": "node prisma/seed.js",
+    "db:studio": "npx prisma studio --schema=prisma/schema.prisma",
+    "start:api": "node apps/api/src/index.js",
+    "start:web": "npm run start --workspace=apps/web",
+    "render:start": "npm run db:schema:postgres && npm run db:push:prod && npm run db:seed && npm run start:api"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "prisma": "^5.14.0"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

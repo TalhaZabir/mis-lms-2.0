@@ -22,7 +22,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "prisma": "^5.14.0"
+    "prisma": "^7.10.1"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"
